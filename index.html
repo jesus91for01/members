@@ -1,1 +1,946 @@
-<html>Test</html)
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>주소 시각화 및 구역 관리 시스템</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+
+    <style>
+        body { font-family: 'Noto Sans KR', sans-serif; overflow: hidden; user-select: none; /* 텍스트 드래그 방지 */ }
+        #map { width: 100%; height: 100%; }
+        
+        .list-row:hover { background-color: #f3f4f6; cursor: pointer; }
+        .selected-row { background-color: #eff6ff !important; border-left: 4px solid #2563eb; }
+        .no-marker-row { background-color: #fff1f2; }
+        
+        .modal-overlay { background-color: rgba(0, 0, 0, 0.5); }
+        input[type="checkbox"] { cursor: pointer; }
+
+        /* 테이블 스타일 */
+        th { white-space: nowrap; position: relative; overflow: hidden; text-overflow: ellipsis; }
+        td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        
+        .resizer {
+            position: absolute; top: 0; right: 0; width: 4px; cursor: col-resize;
+            user-select: none; height: 100%; background-color: transparent; z-index: 10;
+        }
+        .resizer:hover, .resizing { background-color: #3b82f6; width: 4px; }
+        
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        @media print {
+            @page { size: A4; margin: 10mm; }
+            body, html { height: auto !important; overflow: visible !important; background: white !important; }
+            header, #drawGuide, .no-print, .resizer, #statsSection, #selectionSummaryPanel, #filterSection, 
+            th:first-child, td:first-child, th:last-child, td:last-child { display: none !important; }
+            
+            main { display: block !important; height: auto !important; }
+            #map-container {
+                position: relative !important; width: 100% !important; height: 95vh !important;
+                page-break-after: always !important; border: 2px solid #000; margin-bottom: 20px;
+            }
+            #rightPanel, #listContainer {
+                width: 100% !important; height: auto !important; border: none !important;
+                box-shadow: none !important; display: block !important; overflow: visible !important;
+            }
+            table { width: 100% !important; border-collapse: collapse !important; font-size: 11pt !important; table-layout: auto !important; }
+            thead { display: table-header-group !important; }
+            tbody { display: table-row-group !important; }
+            tr { page-break-inside: avoid; }
+            th, td { border: 1px solid #000 !important; padding: 8px !important; color: #000 !important; white-space: normal !important; }
+            #printTitle { display: block !important; text-align: center; font-size: 24px; margin-bottom: 20px; font-weight: bold; }
+        }
+        #printTitle { display: none; }
+    </style>
+</head>
+<body class="bg-gray-100 h-screen flex flex-col">
+
+    <!-- 헤더 -->
+    <header class="bg-white shadow-sm px-6 py-3 z-20 flex justify-between items-center h-14 shrink-0 border-b no-print">
+        <div class="flex items-center gap-4">
+            <h1 class="text-lg font-bold text-gray-800 flex items-center">
+                <i class="fa-solid fa-map-location-dot text-blue-600 text-xl mr-2"></i>
+                구역 관리
+            </h1>
+            <div class="h-6 w-px bg-gray-300 mx-2"></div>
+            <div class="flex items-center gap-2">
+                <button onclick="downloadSample()" class="bg-gray-500 hover:bg-gray-600 text-white px-3 py-1.5 rounded text-sm transition shadow-sm">
+                    <i class="fa-solid fa-file-arrow-down mr-2"></i>양식
+                </button>
+                <input type="file" id="excelFile" accept=".xlsx, .xls" class="hidden" onchange="handleFileUpload(event)">
+                <label for="excelFile" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded text-sm cursor-pointer transition shadow-sm">
+                    <i class="fa-solid fa-file-excel mr-2"></i>업로드
+                </label>
+                <button onclick="exportToExcel()" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-sm transition shadow-sm">
+                    <i class="fa-solid fa-floppy-disk mr-2"></i>저장
+                </button>
+                <button onclick="window.print()" class="bg-gray-700 hover:bg-gray-800 text-white px-3 py-1.5 rounded text-sm transition shadow-sm">
+                    <i class="fa-solid fa-print mr-2"></i>인쇄
+                </button>
+                <button onclick="toggleMapFullscreen()" class="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1.5 rounded text-sm transition shadow-sm">
+                    <i class="fa-solid fa-expand mr-2"></i>전체화면
+                </button>
+                <span id="statusMsg" class="text-xs text-gray-500 ml-2">준비됨</span>
+            </div>
+        </div>
+        <button onclick="resetAll()" class="text-xs bg-white border border-gray-300 hover:bg-red-50 text-gray-600 px-3 py-1.5 rounded transition">
+            <i class="fa-solid fa-rotate-right mr-1 text-red-400"></i>초기화
+        </button>
+    </header>
+
+    <!-- 메인 컨텐츠 -->
+    <main class="flex flex-1 overflow-hidden">
+        <!-- 좌측: 지도 -->
+        <div id="map-container" class="h-full relative bg-gray-100 border-r" style="width: 65%;">
+            <div id="map"></div>
+            <button id="exitFullscreenBtn" onclick="toggleMapFullscreen()" class="hidden absolute top-4 right-4 z-[9999] bg-white hover:bg-gray-100 text-gray-800 px-4 py-2 rounded shadow-lg border text-sm font-bold transition">
+                <i class="fa-solid fa-compress mr-2"></i>원래대로
+            </button>
+        </div>
+
+        <!-- 리사이저 (경계선 조절) -->
+        <div id="layout-resizer" class="w-1.5 bg-gray-300 hover:bg-blue-500 cursor-col-resize z-40 flex-shrink-0 relative no-print transition-colors group" title="드래그하여 크기 조절">
+            <div class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 h-8 w-0.5 bg-gray-500 group-hover:bg-white rounded"></div>
+        </div>
+
+        <!-- 우측: 패널 -->
+        <div id="rightPanel" class="flex-1 flex flex-col bg-white h-full shadow-xl z-30 min-w-[300px]">
+            <div id="printTitle">구역 현황 명단</div>
+
+            <!-- 1. 상단: 통계 -->
+            <div id="statsSection" class="h-[35%] flex flex-col border-b bg-white no-print">
+                <div class="p-3 border-b bg-gray-50 font-bold text-gray-700 text-sm flex justify-between items-center">
+                    <div class="flex items-center gap-2">
+                        <i class="fa-solid fa-sitemap mr-1 text-blue-500"></i>
+                        <span>조직 통계</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div class="flex items-center gap-1">
+                            <input type="checkbox" id="statsCheckAll" onchange="toggleAll(this.checked)" checked class="rounded text-blue-600 focus:ring-0">
+                            <label for="statsCheckAll" class="text-xs font-normal text-gray-500 cursor-pointer">전체표시</label>
+                        </div>
+                        <span class="text-xs font-normal bg-white border px-2 py-0.5 rounded text-gray-500">총 <span id="totalCount">0</span>명</span>
+                    </div>
+                </div>
+                <div id="statsTreeContainer" class="flex-1 overflow-y-auto p-2 space-y-2">
+                    <div class="text-center py-10 text-gray-400 text-xs">데이터를 업로드하세요.</div>
+                </div>
+            </div>
+
+            <!-- 2. 중단: 선택 요약 -->
+            <div id="selectionSummaryPanel" class="bg-blue-50 border-b border-blue-100 p-2 shrink-0 transition-all text-xs no-print">
+                <div class="flex justify-between items-center mb-1">
+                    <span class="font-bold text-blue-800"><i class="fa-solid fa-check-double mr-1"></i>체크된 인원</span>
+                    <span class="font-bold text-blue-600"><span id="selectedCount">0</span>명</span>
+                </div>
+                <div id="selectionTags" class="flex flex-wrap gap-1 max-h-[40px] overflow-y-auto text-[10px]">
+                    <span class="text-gray-400 px-1">없음</span>
+                </div>
+            </div>
+
+            <!-- 3. 하단: 인원 명단 -->
+            <div id="listContainer" class="flex-1 flex flex-col overflow-hidden">
+                <div id="filterSection" class="p-2 bg-gray-100 border-b flex flex-col gap-2 no-print">
+                    <div class="flex gap-2 text-xs">
+                        <select id="filterParish" onchange="applyListFilter()" class="border rounded px-2 py-1 flex-1 bg-white">
+                            <option value="">전체 교구</option>
+                        </select>
+                        <select id="filterZone" onchange="applyListFilter()" class="border rounded px-2 py-1 flex-1 bg-white">
+                            <option value="">전체 구역</option>
+                        </select>
+                    </div>
+                    <div class="flex gap-2 text-xs items-center">
+                        <div class="relative flex-1">
+                            <i class="fa-solid fa-magnifying-glass absolute left-2 top-1.5 text-gray-400"></i>
+                            <input type="text" id="filterName" onkeyup="applyListFilter()" placeholder="이름 검색" class="w-full border rounded pl-7 pr-2 py-1">
+                        </div>
+                        <div class="flex items-center gap-1 whitespace-nowrap">
+                            <input type="checkbox" id="listCheckAll" onchange="toggleListVisible(this.checked)" checked class="rounded text-blue-600 focus:ring-0">
+                            <label for="listCheckAll" class="cursor-pointer text-gray-600">목록선택</label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex-1 overflow-y-auto overflow-x-auto">
+                    <table id="resizeTable" class="w-full text-sm text-left border-collapse table-fixed min-w-[400px]">
+                        <thead class="text-xs text-gray-500 uppercase bg-white sticky top-0 z-10 shadow-sm select-none">
+                            <tr>
+                                <th class="px-2 py-2 border-b w-8 text-center no-print"><i class="fa-solid fa-check text-gray-300"></i></th>
+                                <th class="px-2 py-2 border-b" data-col="parish_zone">교구/구역<div class="resizer no-print"></div></th>
+                                <th class="px-2 py-2 border-b" data-col="name">이름<div class="resizer no-print"></div></th>
+                                <th class="px-2 py-2 border-b" data-col="role">직분<div class="resizer no-print"></div></th>
+                                <th class="px-2 py-2 border-b" data-col="address">주소<div class="resizer no-print"></div></th>
+                                <th class="px-2 py-2 border-b w-12 text-center">출석<div class="resizer no-print"></div></th>
+                                <th class="px-2 py-2 border-b w-10 text-center no-print"><i class="fa-solid fa-pen-to-square"></i></th>
+                            </tr>
+                        </thead>
+                        <tbody id="personList" class="divide-y divide-gray-100">
+                            <!-- 리스트 아이템 -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- 수정 모달 -->
+    <div id="editModal" class="fixed inset-0 z-50 hidden flex items-center justify-center modal-overlay no-print">
+        <div class="bg-white rounded-lg shadow-lg w-[400px] p-6 relative">
+            <h3 class="text-lg font-bold text-gray-800 mb-4 border-b pb-2"><i class="fa-solid fa-user-pen mr-2 text-blue-600"></i>정보 수정</h3>
+            <input type="hidden" id="editId">
+            <div class="space-y-3 text-sm">
+                <div class="grid grid-cols-2 gap-3">
+                    <div><label class="block text-gray-600 mb-1">이름</label><input type="text" id="editName" class="w-full border rounded px-2 py-1.5"></div>
+                    <div><label class="block text-gray-600 mb-1">직분</label><input type="text" id="editRole" class="w-full border rounded px-2 py-1.5"></div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-gray-600 mb-1">교구</label>
+                        <select id="editParish" class="w-full border rounded px-2 py-1.5 bg-white"></select>
+                    </div>
+                    <div><label class="block text-gray-600 mb-1">구역</label><input type="text" id="editZone" class="w-full border rounded px-2 py-1.5"></div>
+                </div>
+                <div><label class="block text-gray-600 mb-1">소속</label><input type="text" id="editGroup" class="w-full border rounded px-2 py-1.5"></div>
+                <div>
+                    <label class="block text-gray-600 mb-1">주소</label>
+                    <div class="flex gap-2">
+                        <input type="text" id="editAddress" class="flex-1 border rounded px-2 py-1.5">
+                        <button onclick="alert('주소 수정 시 지도 위치가 자동 변경됩니다.')" class="text-gray-400 hover:text-gray-600"><i class="fa-solid fa-circle-info"></i></button>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-gray-600 mb-1">출석여부</label>
+                    <div class="flex gap-4">
+                        <label><input type="radio" name="editAttendance" value="O" class="mr-1"> O</label>
+                        <label><input type="radio" name="editAttendance" value="X" class="mr-1"> X</label>
+                    </div>
+                </div>
+            </div>
+            <div class="mt-6 flex justify-end gap-2">
+                <button onclick="closeEditModal()" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded text-gray-700 text-sm">취소</button>
+                <button onclick="saveEdit()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-bold">저장</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="text/javascript" src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=1d9268593ca620c81ee6929f1f2de6a3&libraries=services&autoload=false"></script>
+
+    <script>
+        // --- [신규] 보안 기능: 우클릭 차단 및 개발자 도구 방지 ---
+        document.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+        });
+
+        document.addEventListener('keydown', function (e) {
+            // F12
+            if (e.key === 'F12' || e.keyCode === 123) {
+                e.preventDefault();
+                e.returnValue = false;
+            }
+            // Ctrl+Shift+I, C, J, U
+            if ((e.ctrlKey && e.shiftKey && ['I', 'C', 'J'].includes(e.key.toUpperCase())) ||
+                (e.ctrlKey && e.key.toUpperCase() === 'U')) {
+                e.preventDefault();
+                e.returnValue = false;
+            }
+        });
+
+        // --- 전역 변수 ---
+        let map, geocoder;
+        let allData = []; 
+        let stats = {};   
+        let selectedMarker = null;
+
+        // 고정 색상 확장
+        const FIXED_COLORS = {
+            '1교구': { h: 220, s: 90, l: 50 }, // Blue
+            '2교구': { h: 0, s: 90, l: 50 },   // Red
+            '3교구': { h: 120, s: 90, l: 40 }, // Green
+            '4교구': { h: 45, s: 100, l: 50 }, // Yellow
+            '5교구': { h: 270, s: 90, l: 60 }, // Purple
+            '6교구': { h: 330, s: 90, l: 60 }, // Pink
+            '7교구': { h: 240, s: 100, l: 30 }, // Navy
+            '8교구': { h: 30, s: 100, l: 50 }  // Orange
+        };
+        let dynamicColors = {};
+
+        window.onload = function() {
+            initTableResizer();
+            initLayoutResizer();
+            
+            // 카카오맵 스크립트가 완전히 준비될 때까지 대기 후 초기화
+            const checkAndLoadMap = setInterval(() => {
+                if (window.kakao && window.kakao.maps) {
+                    clearInterval(checkAndLoadMap);
+                    kakao.maps.load(function() {
+                        const container = document.getElementById('map');
+                        const options = { center: new kakao.maps.LatLng(37.566826, 126.9786567), level: 7 };
+                        map = new kakao.maps.Map(container, options);
+                        geocoder = new kakao.maps.services.Geocoder();
+                    });
+                }
+            }, 100);
+            
+            // 로드 실패(타임아웃) 처리
+            setTimeout(() => {
+                clearInterval(checkAndLoadMap);
+                if(!map) alert("카카오맵 API를 불러오는데 실패했습니다. 네트워크 상태나 API 키를 확인해주세요.");
+            }, 5000);
+        };
+
+        function getParishColorInfo(parishName) {
+            if (FIXED_COLORS[parishName]) return FIXED_COLORS[parishName];
+            if (dynamicColors[parishName]) return dynamicColors[parishName];
+            let hash = 0;
+            for (let i = 0; i < parishName.length; i++) {
+                hash = parishName.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            const h = Math.abs(hash % 360);
+            dynamicColors[parishName] = { h, s: 70, l: 50 };
+            return dynamicColors[parishName];
+        }
+
+        function getMarkerColor(parish, zone) {
+            const base = getParishColorInfo(parish);
+            let zNum = 1;
+            if (zone) {
+                const match = zone.match(/\d+/);
+                if (match) zNum = parseInt(match[0]);
+            }
+            let lightness = Math.min(90, base.l + (zNum - 1) * 10);
+            const hex = hslToHex(base.h, base.s, lightness);
+            const baseHex = hslToHex(base.h, base.s, base.l);
+            return { hex, baseHex };
+        }
+
+        function hslToHex(h, s, l) {
+            l /= 100;
+            const a = s * Math.min(l, 1 - l) / 100;
+            const f = n => {
+                const k = (n + h / 30) % 12;
+                const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+                return Math.round(255 * color).toString(16).padStart(2, '0');
+            };
+            return `#${f(0)}${f(8)}${f(4)}`;
+        }
+
+        function adjustColumnWidths() {
+            const table = document.getElementById('resizeTable');
+            const ths = table.querySelectorAll('th[data-col]');
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            context.font = "14px 'Noto Sans KR', sans-serif"; 
+
+            ths.forEach(th => {
+                const colKey = th.getAttribute('data-col');
+                let maxWidth = 50; 
+                const headerWidth = context.measureText(th.innerText).width + 20;
+                maxWidth = Math.max(maxWidth, headerWidth);
+
+                const sampleData = allData.slice(0, 50);
+                sampleData.forEach(p => {
+                    let text = '';
+                    if (colKey === 'parish_zone') text = `${p.parish} ${p.zone}`;
+                    else if (colKey === 'name') text = p.name;
+                    else if (colKey === 'role') text = p.role;
+                    else if (colKey === 'address') text = p.address || '주소 없음';
+                    const width = context.measureText(text).width + 24; 
+                    maxWidth = Math.max(maxWidth, width);
+                });
+
+                if (colKey === 'address') maxWidth = Math.min(maxWidth, 400);
+                else maxWidth = Math.min(maxWidth, 150);
+
+                th.style.width = `${Math.ceil(maxWidth)}px`;
+            });
+        }
+
+        function populateFilters() {
+            const parishSelect = document.getElementById('filterParish');
+            const zoneSelect = document.getElementById('filterZone');
+            while (parishSelect.options.length > 1) parishSelect.remove(1);
+            while (zoneSelect.options.length > 1) zoneSelect.remove(1);
+
+            const parishes = [...new Set(allData.map(p => p.parish))].sort();
+            parishes.forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p; opt.innerText = p; parishSelect.appendChild(opt);
+            });
+
+            const zones = [...new Set(allData.map(p => p.zone))].sort((a, b) => {
+                const numA = parseInt(a.replace(/[^0-9]/g, '')) || 0;
+                const numB = parseInt(b.replace(/[^0-9]/g, '')) || 0;
+                return numA - numB || a.localeCompare(b);
+            });
+            zones.forEach(z => {
+                const opt = document.createElement('option');
+                opt.value = z; opt.innerText = z; zoneSelect.appendChild(opt);
+            });
+        }
+
+        function applyListFilter() {
+            const pFilter = document.getElementById('filterParish').value;
+            const zFilter = document.getElementById('filterZone').value;
+            const nFilter = document.getElementById('filterName').value.toLowerCase();
+
+            const filtered = allData.filter(p => {
+                const matchParish = pFilter === "" || p.parish === pFilter;
+                const matchZone = zFilter === "" || p.zone === zFilter;
+                const matchName = nFilter === "" || p.name.toLowerCase().includes(nFilter);
+                return matchParish && matchZone && matchName;
+            });
+
+            renderPersonList(filtered);
+            const listCheckAll = document.getElementById('listCheckAll');
+            const allVisibleChecked = filtered.length > 0 && filtered.every(p => p.checked);
+            listCheckAll.checked = allVisibleChecked;
+        }
+
+        function exportToExcel() {
+            if (allData.length === 0) { alert("저장할 데이터가 없습니다."); return; }
+            const exportData = allData.map(p => ({
+                '이름': p.name, '주소': p.address, '교구': p.parish, '구역': p.zone,
+                '소속': p.group, '직분': p.role, '출석여부': p.attendance
+            }));
+            const ws = XLSX.utils.json_to_sheet(exportData);
+            ws['!cols'] = [{wch: 10}, {wch: 50}, {wch: 10}, {wch: 10}, {wch: 15}, {wch: 10}, {wch: 10}];
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "구역명단");
+            const date = new Date().toISOString().slice(0,10).replace(/-/g,"");
+            XLSX.writeFile(wb, `구역관리_데이터_${date}.xlsx`);
+        }
+
+        function openEditModal(id) {
+            const person = allData.find(p => p.id === id);
+            if(!person) return;
+
+            const parishSelect = document.getElementById('editParish');
+            parishSelect.innerHTML = '';
+            const parishes = [...new Set(allData.map(p => p.parish))].sort();
+            parishes.forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p; opt.innerText = p;
+                parishSelect.appendChild(opt);
+            });
+            if (!parishes.includes(person.parish)) {
+                const opt = document.createElement('option');
+                opt.value = person.parish; opt.innerText = person.parish;
+                parishSelect.appendChild(opt);
+            }
+
+            document.getElementById('editId').value = person.id;
+            document.getElementById('editName').value = person.name;
+            document.getElementById('editRole').value = person.role;
+            parishSelect.value = person.parish;
+            document.getElementById('editZone').value = person.zone;
+            document.getElementById('editGroup').value = person.group;
+            document.getElementById('editAddress').value = person.address;
+            const radios = document.getElementsByName('editAttendance');
+            for(const r of radios) r.checked = (r.value === person.attendance);
+            document.getElementById('editModal').classList.remove('hidden');
+        }
+
+        function closeEditModal() {
+            document.getElementById('editModal').classList.add('hidden');
+        }
+
+        async function saveEdit() {
+            const id = parseInt(document.getElementById('editId').value);
+            const person = allData.find(p => p.id === id);
+            if(!person) return;
+
+            const newName = document.getElementById('editName').value;
+            const newRole = document.getElementById('editRole').value;
+            const newParish = document.getElementById('editParish').value;
+            const newZone = document.getElementById('editZone').value;
+            const newGroup = document.getElementById('editGroup').value;
+            const newAddress = document.getElementById('editAddress').value;
+            const newAttendance = document.querySelector('input[name="editAttendance"]:checked').value;
+            const addressChanged = (person.address !== newAddress);
+
+            person.name = newName; person.role = newRole; person.parish = newParish;
+            person.zone = newZone; person.group = newGroup; person.attendance = newAttendance;
+            person.markerText = newZone.replace(/[^0-9]/g, '');
+
+            if (addressChanged) {
+                person.address = newAddress;
+                if(newAddress.trim() === "") {
+                    if(person.marker) person.marker.setMap(null);
+                    person.marker = null;
+                } else {
+                    await new Promise(resolve => {
+                        geocoder.addressSearch(newAddress, (result, status) => {
+                            if (status === kakao.maps.services.Status.OK) {
+                                const lat = parseFloat(result[0].y);
+                                const lng = parseFloat(result[0].x);
+                                person.lat = lat; person.lng = lng;
+                                if (!person.marker) {
+                                    person.marker = new kakao.maps.Marker({ map: map, zIndex: 1 });
+                                    kakao.maps.event.addListener(person.marker, 'click', () => highlightPerson(person.id));
+                                }
+                                person.marker.setPosition(new kakao.maps.LatLng(lat, lng));
+                                map.panTo(person.marker.getPosition());
+                            } else {
+                                alert("주소 검색 실패. 지도에 표시되지 않습니다.");
+                                if(person.marker) person.marker.setMap(null);
+                                person.marker = null;
+                            }
+                            resolve();
+                        });
+                    });
+                }
+            }
+
+            if (person.marker) {
+                const colorInfo = getMarkerColor(person.parish, person.zone);
+                const markerImg = createSvgMarker(colorInfo.hex, person.markerText);
+                person.originalImage = markerImg;
+                person.marker.setImage(markerImg);
+                person.marker.setTitle(`${person.name} (${person.group})`);
+                if (selectedMarker === person.marker) highlightPerson(person.id);
+            }
+
+            closeEditModal();
+            updateStatsAndUI();
+            populateFilters();
+            applyListFilter();
+            alert("수정되었습니다.");
+        }
+
+        function initTableResizer() {
+            const table = document.getElementById('resizeTable');
+            const cols = table.querySelectorAll('th');
+            cols.forEach((col) => {
+                const resizer = col.querySelector('.resizer');
+                if (!resizer) return;
+                let x = 0, w = 0;
+                const mouseDownHandler = function(e) {
+                    x = e.clientX;
+                    w = parseInt(window.getComputedStyle(col).width, 10);
+                    document.addEventListener('mousemove', mouseMoveHandler);
+                    document.addEventListener('mouseup', mouseUpHandler);
+                    resizer.classList.add('resizing');
+                };
+                const mouseMoveHandler = function(e) {
+                    const dx = e.clientX - x;
+                    col.style.width = `${w + dx}px`;
+                };
+                const mouseUpHandler = function() {
+                    document.removeEventListener('mousemove', mouseMoveHandler);
+                    document.removeEventListener('mouseup', mouseUpHandler);
+                    resizer.classList.remove('resizing');
+                };
+                resizer.addEventListener('mousedown', mouseDownHandler);
+            });
+        }
+
+        // --- 지도 전체화면 기능 ---
+        let isMapFullscreen = false;
+        let savedMapWidth = "65%";
+
+        function toggleMapFullscreen() {
+            const header = document.querySelector('header');
+            const rightPanel = document.getElementById('rightPanel');
+            const resizer = document.getElementById('layout-resizer');
+            const mapContainer = document.getElementById('map-container');
+            const exitBtn = document.getElementById('exitFullscreenBtn');
+
+            isMapFullscreen = !isMapFullscreen;
+
+            if (isMapFullscreen) {
+                // 현재 설정된 경계선 너비 저장
+                savedMapWidth = mapContainer.style.width || "65%";
+                
+                // 패널 및 헤더 숨기기
+                header.classList.add('hidden');
+                rightPanel.classList.add('hidden');
+                resizer.classList.add('hidden');
+                
+                // 지도 최대화
+                mapContainer.style.width = "100%";
+                exitBtn.classList.remove('hidden');
+            } else {
+                // 패널 및 헤더 복구
+                header.classList.remove('hidden');
+                rightPanel.classList.remove('hidden');
+                resizer.classList.remove('hidden');
+                
+                // 지도 너비 복구
+                mapContainer.style.width = savedMapWidth;
+                exitBtn.classList.add('hidden');
+            }
+
+            // 지도 레이아웃 재계산 및 렌더링 강제 업데이트
+            setTimeout(() => {
+                if (map) map.relayout();
+            }, 50);
+        }
+
+        function downloadSample() {
+            const sampleData = [
+                { '이름': '홍길동', '주소': '서울특별시 중구 세종대로 110', '교구': '1교구', '구역': '1구역', '소속': '봉사회', '직분': '팀장', '출석여부': 'O' },
+                { '이름': '김철수', '주소': '서울특별시 종로구 종로 1', '교구': '5교구', '구역': '1구역', '소속': '청년회', '직분': '팀원', '출석여부': 'X' }
+            ];
+            const ws = XLSX.utils.json_to_sheet(sampleData);
+            ws['!cols'] = [{wch: 10}, {wch: 40}, {wch: 10}, {wch: 10}, {wch: 15}, {wch: 10}, {wch: 10}];
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "샘플데이터");
+            XLSX.writeFile(wb, "구역관리_샘플양식.xlsx");
+        }
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const jsonData = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+                    if (jsonData.length > 0) processData(jsonData);
+                } catch (err) { alert("오류: " + err.message); }
+            };
+            reader.readAsArrayBuffer(file);
+            event.target.value = '';
+        }
+
+        async function processData(data) {
+            if (!geocoder) return;
+            document.getElementById('statusMsg').innerText = "처리 중...";
+            
+            allData.forEach(d => { if(d.marker) d.marker.setMap(null); });
+            allData = [];
+            dynamicColors = {}; 
+            
+            let tempValid = [], tempInvalid = [];
+
+            for (const [idx, row] of data.entries()) {
+                const name = row['이름'] || '미상';
+                const parish = row['교구'] || '미지정';
+                const zone = row['구역'] || '미지정';
+                const group = row['소속'] || '기타';
+                const address = row['주소'] || '';
+                
+                const person = {
+                    id: idx, name, address, parish, zone, group,
+                    role: row['직분'] || '-',
+                    attendance: row['출석여부'] || 'X',
+                    marker: null,
+                    markerText: zone.replace(/[^0-9]/g, ''),
+                    checked: true
+                };
+
+                if (address) {
+                    await new Promise(resolve => {
+                        geocoder.addressSearch(address, (result, status) => {
+                            if (status === kakao.maps.services.Status.OK) {
+                                const lat = parseFloat(result[0].y);
+                                const lng = parseFloat(result[0].x);
+                                const colorInfo = getMarkerColor(parish, zone);
+                                const markerImg = createSvgMarker(colorInfo.hex, person.markerText);
+
+                                person.marker = new kakao.maps.Marker({
+                                    map: map,
+                                    position: new kakao.maps.LatLng(lat, lng),
+                                    title: `${name} (${group})`,
+                                    image: markerImg,
+                                    zIndex: 1
+                                });
+                                person.originalImage = markerImg;
+                                kakao.maps.event.addListener(person.marker, 'click', () => highlightPerson(person.id));
+                                tempValid.push(person);
+                            } else {
+                                tempInvalid.push(person);
+                            }
+                            resolve();
+                        });
+                    });
+                } else {
+                    tempInvalid.push(person);
+                }
+                if(idx % 10 === 0) document.getElementById('statusMsg').innerText = `${idx}건 처리...`;
+            }
+
+            allData = [...tempValid, ...tempInvalid];
+            document.getElementById('statusMsg').innerText = "완료";
+            document.getElementById('totalCount').innerText = allData.length;
+            
+            populateFilters();
+            updateStatsAndUI();
+            adjustColumnWidths(); 
+            
+            if (tempValid.length > 0) {
+                const bounds = new kakao.maps.LatLngBounds();
+                tempValid.forEach(d => bounds.extend(d.marker.getPosition()));
+                map.setBounds(bounds);
+            }
+        }
+
+        function updateStatsAndUI() {
+            stats = {};
+            allData.forEach(p => {
+                if (!stats[p.parish]) stats[p.parish] = { total: 0, zones: {} };
+                stats[p.parish].total++;
+                if (!stats[p.parish].zones[p.zone]) stats[p.parish].zones[p.zone] = { total: 0, groups: {} };
+                stats[p.parish].zones[p.zone].total++;
+                if (!stats[p.parish].zones[p.zone].groups[p.group]) stats[p.parish].zones[p.zone].groups[p.group] = 0;
+                stats[p.parish].zones[p.zone].groups[p.group]++;
+            });
+            renderStatsTree();
+            applyListFilter();
+            updateSelectionSummary();
+        }
+
+        function renderStatsTree() {
+            const container = document.getElementById('statsTreeContainer');
+            container.innerHTML = '';
+            Object.keys(stats).sort().forEach(parish => {
+                const pData = stats[parish];
+                const colorInfo = getParishColorInfo(parish);
+                const baseHex = hslToHex(colorInfo.h, colorInfo.s, colorInfo.l);
+                
+                const isParishChecked = allData.filter(p => p.parish === parish).every(p => p.checked);
+
+                const parishDiv = document.createElement('div');
+                parishDiv.className = "border rounded bg-white overflow-hidden shadow-sm text-sm";
+                parishDiv.innerHTML = `
+                    <div class="flex items-center justify-between p-2 bg-gray-50 border-b cursor-pointer hover:bg-gray-100">
+                        <div class="flex items-center gap-2">
+                            <input type="checkbox" ${isParishChecked ? 'checked' : ''} onchange="toggleGroup('parish', '${parish}', this.checked)" class="rounded text-blue-600 focus:ring-0">
+                            <span class="w-3 h-3 rounded-full shadow-sm" style="background-color: ${baseHex}"></span>
+                            <span class="font-bold text-gray-800">${parish}</span>
+                        </div>
+                        <span class="text-xs font-bold bg-white border px-1.5 rounded">${pData.total}명</span>
+                    </div>
+                `;
+                const zonesDiv = document.createElement('div');
+                zonesDiv.className = "divide-y divide-gray-100";
+                Object.keys(pData.zones).sort().forEach(zone => {
+                    const zData = pData.zones[zone];
+                    const isZoneChecked = allData.filter(p => p.parish === parish && p.zone === zone).every(p => p.checked);
+
+                    let groupsHtml = '';
+                    Object.keys(zData.groups).sort().forEach(group => {
+                        const isGroupChecked = allData.filter(p => p.parish === parish && p.zone === zone && p.group === group).every(p => p.checked);
+                        groupsHtml += `
+                            <div class="flex items-center gap-1 bg-gray-50 px-1.5 py-0.5 rounded border text-[11px] text-gray-600 whitespace-nowrap">
+                                <input type="checkbox" ${isGroupChecked ? 'checked' : ''} onchange="toggleGroup('group', '${parish}|${zone}|${group}', this.checked)" class="w-3 h-3 rounded text-blue-600">
+                                <span>${group} ${zData.groups[group]}</span>
+                            </div>
+                        `;
+                    });
+                    zonesDiv.innerHTML += `
+                        <div class="p-2 pl-4">
+                            <div class="flex items-center gap-2 mb-1">
+                                <input type="checkbox" ${isZoneChecked ? 'checked' : ''} onchange="toggleGroup('zone', '${parish}|${zone}', this.checked)" class="rounded text-blue-600 focus:ring-0">
+                                <span class="font-semibold text-gray-700 text-xs">└ ${zone}</span>
+                                <span class="text-[10px] text-gray-400">(${zData.total}명)</span>
+                            </div>
+                            <div class="flex flex-wrap gap-1 pl-5">${groupsHtml}</div>
+                        </div>
+                    `;
+                });
+                parishDiv.appendChild(zonesDiv);
+                container.appendChild(parishDiv);
+            });
+        }
+
+        function toggleGroup(level, key, isChecked) {
+            allData.forEach(p => {
+                let match = false;
+                if (level === 'parish' && p.parish === key) match = true;
+                else if (level === 'zone') { const [pa, zo] = key.split('|'); if (p.parish === pa && p.zone === zo) match = true; }
+                else if (level === 'group') { const [pa, zo, gr] = key.split('|'); if (p.parish === pa && p.zone === zo && p.group === gr) match = true; }
+                if (match) { p.checked = isChecked; updateMarkerVisibility(p); }
+            });
+            renderStatsTree();
+            applyListFilter(); 
+            updateSelectionSummary();
+        }
+
+        function togglePerson(id, isChecked) {
+            const person = allData.find(p => p.id === id);
+            if (person) { 
+                person.checked = isChecked; 
+                updateMarkerVisibility(person); 
+                updateSelectionSummary();
+                renderStatsTree();
+            }
+        }
+
+        function toggleAll(isChecked) {
+            allData.forEach(p => { p.checked = isChecked; updateMarkerVisibility(p); });
+            document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = isChecked);
+            applyListFilter();
+            updateSelectionSummary();
+            renderStatsTree();
+        }
+
+        function toggleListVisible(isChecked) {
+            const pFilter = document.getElementById('filterParish').value;
+            const zFilter = document.getElementById('filterZone').value;
+            const nFilter = document.getElementById('filterName').value.toLowerCase();
+
+            allData.forEach(p => {
+                const matchParish = pFilter === "" || p.parish === pFilter;
+                const matchZone = zFilter === "" || p.zone === zFilter;
+                const matchName = nFilter === "" || p.name.toLowerCase().includes(nFilter);
+                
+                if (matchParish && matchZone && matchName) {
+                    p.checked = isChecked;
+                    updateMarkerVisibility(p);
+                }
+            });
+            renderStatsTree();
+            applyListFilter();
+            updateSelectionSummary();
+        }
+
+        function updateMarkerVisibility(person) {
+            if (person.marker) person.marker.setMap(person.checked ? map : null);
+        }
+
+        function updateSelectionSummary() {
+            const checkedData = allData.filter(p => p.checked);
+            document.getElementById('selectedCount').innerText = checkedData.length;
+            const container = document.getElementById('selectionTags');
+            container.innerHTML = '';
+            if (checkedData.length === 0) { container.innerHTML = '<span class="text-gray-400 px-1">선택된 인원이 없습니다.</span>'; return; }
+            const summary = {};
+            checkedData.forEach(p => { if (!summary[p.group]) summary[p.group] = 0; summary[p.group]++; });
+            Object.keys(summary).sort().forEach(group => {
+                const tag = document.createElement('span');
+                tag.className = "bg-white text-blue-600 border border-blue-200 px-1.5 py-0.5 rounded shadow-sm font-medium";
+                tag.innerText = `${group} ${summary[group]}`;
+                container.appendChild(tag);
+            });
+        }
+
+        function renderPersonList(dataToRender) {
+            const list = dataToRender || allData;
+            const tbody = document.getElementById('personList');
+            tbody.innerHTML = '';
+            const fragment = document.createDocumentFragment();
+
+            list.forEach(p => {
+                const tr = document.createElement('tr');
+                tr.id = `row-${p.id}`;
+                tr.className = `border-b list-row ${p.address ? '' : 'no-marker-row'}`;
+                
+                const colorInfo = getMarkerColor(p.parish, p.zone);
+                const colorHex = colorInfo.baseHex;
+                const badgeStyle = `background-color: ${colorHex}1A; color: ${colorHex}; border: 1px solid ${colorHex}40;`;
+
+                tr.innerHTML = `
+                    <td class="px-2 py-2 text-center no-print">
+                        <input type="checkbox" ${p.checked ? 'checked' : ''} onchange="togglePerson(${p.id}, this.checked)" class="rounded text-blue-600 focus:ring-0">
+                    </td>
+                    <td class="px-2 py-2 text-center" onclick="highlightPerson(${p.id})">
+                        <span class="text-xs font-bold px-2 py-1 rounded whitespace-nowrap" style="${badgeStyle}">${p.parish} ${p.zone}</span>
+                        <div class="text-[10px] text-gray-500 mt-1">${p.group}</div>
+                    </td>
+                    <td class="px-2 py-2 font-medium text-gray-800 text-sm truncate" onclick="highlightPerson(${p.id})">${p.name}</td>
+                    <td class="px-2 py-2 text-center text-xs text-gray-600 truncate" onclick="highlightPerson(${p.id})">${p.role}</td>
+                    <td class="px-2 py-2 text-xs text-gray-500 truncate" title="${p.address}" onclick="highlightPerson(${p.id})">${p.address || '<span class="text-red-400">주소 없음</span>'}</td>
+                    <td class="px-2 py-2 text-center" onclick="highlightPerson(${p.id})">
+                        <span class="px-2 py-0.5 rounded-full text-xs font-bold text-white ${p.attendance === 'O' ? 'bg-green-500' : 'bg-gray-400'}">${p.attendance}</span>
+                    </td>
+                    <td class="px-2 py-2 text-center no-print">
+                        <button onclick="openEditModal(${p.id})" class="text-gray-400 hover:text-blue-600 transition p-1"><i class="fa-solid fa-pen"></i></button>
+                    </td>
+                `;
+                fragment.appendChild(tr);
+            });
+            tbody.appendChild(fragment);
+        }
+
+        function createSvgMarker(color, text) {
+            const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="35" height="45"><path fill="${color}" stroke="white" stroke-width="1" d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/><circle cx="12" cy="9" r="4" fill="rgba(0,0,0,0.1)"/><text x="12" y="13" font-size="10" font-weight="bold" fill="white" text-anchor="middle" font-family="sans-serif">${text}</text></svg>`;
+            return new kakao.maps.MarkerImage('data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg), new kakao.maps.Size(35, 45), { offset: new kakao.maps.Point(17, 45) });
+        }
+
+        function highlightPerson(id) {
+            const person = allData.find(p => p.id === id);
+            if (!person) return;
+            if(selectedMarker) {
+                const prev = allData.find(p => p.marker === selectedMarker);
+                if(prev) { prev.marker.setImage(prev.originalImage); prev.marker.setZIndex(1); }
+            }
+            if (person.marker) {
+                if (!person.checked) {
+                    person.checked = true; updateMarkerVisibility(person); updateSelectionSummary();
+                    renderStatsTree();
+                    const cb = document.querySelector(`#row-${id} input`);
+                    if(cb) cb.checked = true;
+                }
+                const highlightImg = createSvgMarker('#000000', person.markerText);
+                person.marker.setImage(highlightImg); person.marker.setZIndex(999);
+                selectedMarker = person.marker; map.panTo(person.marker.getPosition());
+            } else { alert("위치 정보가 없는 인원입니다."); }
+            
+            document.querySelectorAll('.selected-row').forEach(el => el.classList.remove('selected-row'));
+            const row = document.getElementById(`row-${id}`);
+            if(row) { row.classList.add('selected-row'); row.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+        }
+
+        function resetAll() {
+            if(!confirm("초기화 하시겠습니까?")) return;
+            allData.forEach(d => { if(d.marker) d.marker.setMap(null); });
+            allData = [];
+            document.getElementById('statsTreeContainer').innerHTML = '<div class="text-center py-10 text-gray-400 text-xs">데이터를 업로드하세요.</div>';
+            document.getElementById('personList').innerHTML = '';
+            document.getElementById('totalCount').innerText = '0';
+            document.getElementById('selectedCount').innerText = '0';
+            document.getElementById('selectionTags').innerHTML = '<span class="text-gray-400 px-1">없음</span>';
+            populateFilters();
+        }
+
+        // --- 좌우 패널 크기 조절 기능 ---
+        function initLayoutResizer() {
+            const resizer = document.getElementById('layout-resizer');
+            const leftPanel = document.getElementById('map-container');
+            let isDragging = false;
+
+            resizer.addEventListener('mousedown', function(e) {
+                isDragging = true;
+                document.body.style.cursor = 'col-resize';
+                e.preventDefault(); // 텍스트 드래그 선택 방지
+            });
+
+            document.addEventListener('mousemove', function(e) {
+                if (!isDragging) return;
+                
+                // 마우스 위치에 따라 좌측 패널의 너비를 %로 계산
+                let newWidth = (e.clientX / window.innerWidth) * 100;
+                
+                // 양쪽 패널이 너무 좁아지지 않도록 제한 (지도 최소 20%, 패널 최소 20%)
+                if (newWidth < 20) newWidth = 20;
+                if (newWidth > 80) newWidth = 80;
+                
+                leftPanel.style.width = `${newWidth}%`;
+            });
+
+            document.addEventListener('mouseup', function() {
+                if (isDragging) {
+                    isDragging = false;
+                    document.body.style.cursor = '';
+                }
+            });
+
+            // 패널 크기가 변경될 때마다 카카오맵 레이아웃 재계산 및 중심 보정
+            const resizeObserver = new ResizeObserver(() => {
+                if (map) {
+                    map.relayout();
+                }
+            });
+            resizeObserver.observe(leftPanel);
+        }
+    </script>
+</body>
+</html>
